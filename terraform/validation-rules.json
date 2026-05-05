@@ -1,0 +1,7 @@
+{
+  "date_min_year": 1700,
+  "date_max_year": 2000,
+  "min_abstract_length": 20,
+  "min_subjects_count": 1,
+  "required_fields": ["titleInfo", "name", "originInfo", "subject", "abstract"]
+}

@@ -1,0 +1,771 @@
+{
+  "Comment": "Cursive letter metadata extraction - multi-page support, JSON output",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Lambda PreparePages",
+  "States": {
+    "Lambda PreparePages": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-prepare-pages",
+        "Payload": {
+          "letterId": "{% $states.input.letterId %}",
+          "primaryImageKey": "{% $states.input.primaryImageKey %}",
+          "imageKeys": "{% $states.input.imageKeys %}",
+          "intermediateBucket": "{% $states.input.intermediateBucket %}"
+        }
+      },
+      "Assign": {
+        "letterId": "{% $states.result.Payload.letterId %}",
+        "primaryImageKey": "{% $states.result.Payload.primaryImageKey %}",
+        "imageKeys": "{% $states.result.Payload.imageKeys %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "MapPages"
+    },
+    "MapPages": {
+      "Type": "Map",
+      "Items": "{% $imageKeys %}",
+      "MaxConcurrency": 5,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "AnalyzeDocument",
+        "States": {
+          "AnalyzeDocument": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:textract:analyzeDocument",
+            "Arguments": {
+              "Document": {
+                "S3Object": {
+                  "Bucket": "${pipeline_bucket}",
+                  "Name": "{% $states.input.imageKey %}"
+                }
+              },
+              "FeatureTypes": [
+                "FORMS",
+                "LAYOUT",
+                "SIGNATURES"
+              ]
+            },
+            "Assign": {
+              "pageImageKey": "{% $states.input.imageKey %}",
+              "pageKey": "{% $states.input.pageKey %}",
+              "pageLetterId": "{% $states.input.letterId %}",
+              "pageTextractOutput": "{% $states.result %}"
+            },
+            "Next": "Lambda PagePayloadGenerator"
+          },
+          "Lambda PagePayloadGenerator": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "cursive-payload-generator",
+              "Payload": {
+                "imageKey": "{% $pageImageKey %}",
+                "pageKey": "{% $pageKey %}",
+                "letterId": "{% $pageLetterId %}",
+                "textractBlocks": "{% $pageTextractOutput.Blocks %}"
+              }
+            },
+            "Assign": {
+              "pageInputS3Uri": "{% $states.result.Payload.inputS3Uri %}",
+              "pageOutputS3Uri": "{% $states.result.Payload.outputS3Uri %}",
+              "pageWordPositionsS3Uri": "{% $states.result.Payload.wordPositionsS3Uri %}"
+            },
+            "Output": "{% $states.result.Payload %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Next": "Bedrock TranscribePage"
+          },
+          "Bedrock TranscribePage": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::bedrock:invokeModel",
+            "Arguments": {
+              "ModelId": "${bedrock_model_id}",
+              "ContentType": "application/json",
+              "Accept": "application/json",
+              "Input": {
+                "S3Uri": "{% $pageInputS3Uri %}"
+              },
+              "Output": {
+                "S3Uri": "{% $pageOutputS3Uri %}"
+              }
+            },
+            "Output": "{% $states.input %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Bedrock.ThrottlingException",
+                  "Bedrock.ServiceUnavailableException",
+                  "Bedrock.ModelTimeoutException",
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 6,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Next": "Lambda ParsePageResult"
+          },
+          "Lambda ParsePageResult": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "cursive-result-parser",
+              "Payload": {
+                "outputS3Uri": "{% $pageOutputS3Uri %}",
+                "inputS3Uri": "{% $pageInputS3Uri %}",
+                "wordPositionsS3Uri": "{% $pageWordPositionsS3Uri %}",
+                "imageKey": "{% $pageImageKey %}",
+                "pageKey": "{% $pageKey %}",
+                "letterId": "{% $pageLetterId %}"
+              }
+            },
+            "Output": "{% $states.result.Payload %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "Assign": {
+        "letterId": "{% $letterId %}",
+        "primaryImageKey": "{% $primaryImageKey %}",
+        "imageKeys": "{% $imageKeys %}",
+        "pageResults": "{% $states.result %}"
+      },
+      "Output": "{% $states.input %}",
+      "Next": "Lambda MergeTranscriptions"
+    },
+    "Lambda MergeTranscriptions": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-merge-transcriptions",
+        "Payload": {
+          "letterId": "{% $letterId %}",
+          "primaryImageKey": "{% $primaryImageKey %}",
+          "pageResults": "{% $pageResults %}"
+        }
+      },
+      "Assign": {
+        "letterId": "{% $states.result.Payload.letterId %}",
+        "pageCount": "{% $states.result.Payload.pageCount %}",
+        "primaryImageKey": "{% $states.result.Payload.primaryImageKey %}",
+        "imageKeys": "{% $states.result.Payload.imageKeys %}",
+        "transcriptionByPageS3Uri": "{% $states.result.Payload.transcriptionByPageS3Uri %}",
+        "transcribeThinkingS3Uri": "{% $states.result.Payload.transcribeThinkingS3Uri %}",
+        "wordPositionsS3Uri": "{% $states.result.Payload.wordPositionsS3Uri %}",
+        "transcriptionOutputS3Uri": "{% $states.result.Payload.transcriptionOutputS3Uri %}",
+        "metadataInputS3Uri": "{% $states.result.Payload.metadataInputS3Uri %}",
+        "metadataOutputS3Uri": "{% $states.result.Payload.metadataOutputS3Uri %}",
+        "reconcileInputS3Uri": "{% $states.result.Payload.reconcileInputS3Uri %}",
+        "reconcileOutputS3Uri": "{% $states.result.Payload.reconcileOutputS3Uri %}",
+        "judgeInputS3Uri": "{% $states.result.Payload.judgeInputS3Uri %}",
+        "judgeOutputS3Uri": "{% $states.result.Payload.judgeOutputS3Uri %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Bedrock MetadataExtract"
+    },
+    "Bedrock MetadataExtract": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+      "Arguments": {
+        "ModelId": "${bedrock_model_id}",
+        "ContentType": "application/json",
+        "Accept": "application/json",
+        "Input": {
+          "S3Uri": "{% $metadataInputS3Uri %}"
+        },
+        "Output": {
+          "S3Uri": "{% $metadataOutputS3Uri %}"
+        }
+      },
+      "Output": "{% $states.input %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Bedrock.ThrottlingException",
+            "Bedrock.ServiceUnavailableException",
+            "Bedrock.ModelTimeoutException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 6,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda MetadataParser"
+    },
+    "Lambda MetadataParser": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-metadata-parser",
+        "Payload": {
+          "metadataOutputS3Uri": "{% $metadataOutputS3Uri %}",
+          "letterId": "{% $letterId %}",
+          "pageCount": "{% $pageCount %}",
+          "primaryImageKey": "{% $primaryImageKey %}",
+          "imageKeys": "{% $imageKeys %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "reconcileInputS3Uri": "{% $reconcileInputS3Uri %}",
+          "reconcileOutputS3Uri": "{% $reconcileOutputS3Uri %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}"
+        }
+      },
+      "Assign": {
+        "rawMetadata": "{% $states.result.Payload.rawMetadata %}",
+        "metadataThinkingS3Uri": "{% $states.result.Payload.metadataThinkingS3Uri %}",
+        "reconcileAttempt": 0,
+        "hallucinations": [],
+        "reconcileThinkingS3Uri": null,
+        "enrichedSubjects": [],
+        "genreUri": null
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda AATLookup"
+    },
+    "Lambda AATLookup": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-aat-lookup",
+        "Payload": {
+          "rawMetadata": "{% $rawMetadata %}",
+          "letterId": "{% $letterId %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}"
+        }
+      },
+      "Assign": {
+        "rawMetadata": "{% $states.result.Payload.rawMetadata %}",
+        "aatResolved": "{% $states.result.Payload.aatResolved %}",
+        "genreUri": "{% $states.result.Payload.genreUri %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda SubjectValidator"
+    },
+    "Lambda SubjectValidator": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-subject-validator",
+        "Payload": {
+          "letterId": "{% $letterId %}",
+          "rawMetadata": "{% $rawMetadata %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}",
+          "reconcileThinkingS3Uri": "{% $reconcileThinkingS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}"
+        }
+      },
+      "Assign": {
+        "rawMetadata": "{% $states.result.Payload.rawMetadata %}",
+        "enrichedSubjects": "{% $exists($enrichedSubjects) and $count($enrichedSubjects) > 0 ? $enrichedSubjects : $states.result.Payload.enrichedSubjects %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda BuildReconcilePayload"
+    },
+    "Lambda BuildReconcilePayload": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-reconciler",
+        "Payload": {
+          "letterId": "{% $letterId %}",
+          "rawMetadata": "{% $rawMetadata %}",
+          "imageKeys": "{% $imageKeys %}",
+          "reconcileInputS3Uri": "{% $reconcileInputS3Uri %}",
+          "reconcileAttempt": "{% $reconcileAttempt %}",
+          "previousHallucinations": "{% $hallucinations %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}",
+          "reconcileThinkingS3Uri": "{% $reconcileThinkingS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}"
+        }
+      },
+      "Assign": {
+        "reconcileInputS3Uri": "{% $states.result.Payload.reconcileInputS3Uri %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Bedrock Reconcile"
+    },
+    "Bedrock Reconcile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+      "Arguments": {
+        "ModelId": "${bedrock_model_id}",
+        "ContentType": "application/json",
+        "Accept": "application/json",
+        "Input": {
+          "S3Uri": "{% $reconcileInputS3Uri %}"
+        },
+        "Output": {
+          "S3Uri": "{% $reconcileOutputS3Uri %}"
+        }
+      },
+      "Output": "{% $states.input %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Bedrock.ThrottlingException",
+            "Bedrock.ServiceUnavailableException",
+            "Bedrock.ModelTimeoutException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 6,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda ParseReconcileResult"
+    },
+    "Lambda ParseReconcileResult": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-reconcile-parser",
+        "Payload": {
+          "reconcileOutputS3Uri": "{% $reconcileOutputS3Uri %}",
+          "letterId": "{% $letterId %}",
+          "reconcileAttempt": "{% $reconcileAttempt %}",
+          "previousHallucinations": "{% $hallucinations %}",
+          "enrichedSubjects": "{% $enrichedSubjects %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}"
+        }
+      },
+      "Assign": {
+        "rawMetadata": "{% $states.result.Payload.reconciledMetadata %}",
+        "transcriptionByPageS3Uri": "{% $states.result.Payload.transcriptionByPageS3Uri %}",
+        "reconcileThinkingS3Uri": "{% $states.result.Payload.reconcileThinkingS3Uri %}",
+        "transcribeThinkingS3Uri": "{% $states.result.Payload.transcribeThinkingS3Uri %}",
+        "metadataThinkingS3Uri": "{% $states.result.Payload.metadataThinkingS3Uri %}",
+        "reconciled": "{% $states.result.Payload.reconciled %}",
+        "reconcileAttempt": "{% $states.result.Payload.reconcileAttempt %}",
+        "hallucinations": "{% $states.result.Payload.hallucinations %}",
+        "transcriptionOutputS3Uri": "{% $states.result.Payload.transcriptionOutputS3Uri %}",
+        "wordPositionsS3Uri": "{% $states.result.Payload.wordPositionsS3Uri %}",
+        "judgeInputS3Uri": "{% $states.result.Payload.judgeInputS3Uri %}",
+        "judgeOutputS3Uri": "{% $states.result.Payload.judgeOutputS3Uri %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Check Reconciliation"
+    },
+    "Check Reconciliation": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Comment": "Hallucinations found and retries remaining � re-enrich then reconcile again",
+          "Condition": "{% $reconciled = false and $reconcileAttempt < 2 %}",
+          "Next": "Lambda AATLookup"
+        }
+      ],
+      "Default": "Lambda MetadataFormatter"
+    },
+    "Lambda MetadataFormatter": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-mods-formatter",
+        "Payload": {
+          "rawMetadata": "{% $rawMetadata %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "imageKeys": "{% $imageKeys %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}",
+          "reconcileThinkingS3Uri": "{% $reconcileThinkingS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "letterId": "{% $letterId %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}",
+          "genreUri": "{% $genreUri %}",
+          "enrichedSubjects": "{% $enrichedSubjects %}"
+        }
+      },
+      "Assign": {
+        "metadataRecord": "{% $states.result.Payload.metadataRecord %}",
+        "metadataS3Uri": "{% $states.result.Payload.metadataS3Uri %}",
+        "modsXmlS3Uri": "{% $states.result.Payload.modsXmlS3Uri %}",
+        "judgeInputS3Uri": "{% $states.result.Payload.judgeInputS3Uri %}",
+        "judgeOutputS3Uri": "{% $states.result.Payload.judgeOutputS3Uri %}",
+        "transcriptionOutputS3Uri": "{% $states.result.Payload.transcriptionOutputS3Uri %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Bedrock Judge"
+    },
+    "Bedrock Judge": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+      "Arguments": {
+        "ModelId": "${bedrock_model_id}",
+        "ContentType": "application/json",
+        "Accept": "application/json",
+        "Input": {
+          "S3Uri": "{% $judgeInputS3Uri %}"
+        },
+        "Output": {
+          "S3Uri": "{% $judgeOutputS3Uri %}"
+        }
+      },
+      "Output": "{% $states.input %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Bedrock.ThrottlingException",
+            "Bedrock.ServiceUnavailableException",
+            "Bedrock.ModelTimeoutException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 6,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda ParseJudgeResult"
+    },
+    "Lambda ParseJudgeResult": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-judge-parser",
+        "Payload": {
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}",
+          "reconcileThinkingS3Uri": "{% $reconcileThinkingS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "metadataRecord": "{% $metadataRecord %}",
+          "metadataS3Uri": "{% $metadataS3Uri %}",
+          "modsXmlS3Uri": "{% $modsXmlS3Uri %}",
+          "letterId": "{% $letterId %}"
+        }
+      },
+      "Assign": {
+        "judgeMetadataScore": "{% $states.result.Payload.metadataScore %}",
+        "judgeTranscriptionScore": "{% $states.result.Payload.transcriptionScore %}",
+        "judgeFinalScore": "{% $states.result.Payload.finalScore %}",
+        "judgeReason": "{% $states.result.Payload.reason %}",
+        "modsXmlS3Uri": "{% $states.result.Payload.modsXmlS3Uri %}",
+        "metadataS3Uri": "{% $states.result.Payload.metadataS3Uri %}",
+        "judgeThinkingS3Uri": "{% $states.result.Payload.judgeThinkingS3Uri %}",
+        "fieldIssues": "{% $states.result.Payload.fieldIssues %}",
+        "transcriptionIssues": "{% $states.result.Payload.transcriptionIssues %}",
+        "transcriptionQuality": "{% $states.result.Payload.transcriptionQuality %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda ValidateMetadata"
+    },
+    "Lambda ValidateMetadata": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-validate-mods",
+        "Payload": {
+          "metadataRecord": "{% $metadataRecord %}",
+          "metadataS3Uri": "{% $metadataS3Uri %}",
+          "modsXmlS3Uri": "{% $modsXmlS3Uri %}",
+          "metadataScore": "{% $judgeMetadataScore %}",
+          "transcriptionScore": "{% $judgeTranscriptionScore %}",
+          "finalScore": "{% $judgeFinalScore %}",
+          "reason": "{% $judgeReason %}",
+          "fieldIssues": "{% $fieldIssues %}",
+          "transcriptionIssues": "{% $transcriptionIssues %}",
+          "transcriptionQuality": "{% $transcriptionQuality %}",
+          "letterId": "{% $letterId %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}",
+          "reconcileThinkingS3Uri": "{% $reconcileThinkingS3Uri %}",
+          "judgeThinkingS3Uri": "{% $judgeThinkingS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}"
+        }
+      },
+      "Assign": {
+        "validatedMetadataScore": "{% $states.result.Payload.metadataScore %}",
+        "validatedTranscriptionScore": "{% $states.result.Payload.transcriptionScore %}",
+        "validatedFinalScore": "{% $states.result.Payload.finalScore %}",
+        "validatedReason": "{% $states.result.Payload.reason %}",
+        "metadataRecord": "{% $states.result.Payload.metadataRecord %}",
+        "metadataS3Uri": "{% $states.result.Payload.metadataS3Uri %}",
+        "modsXmlS3Uri": "{% $states.result.Payload.modsXmlS3Uri %}",
+        "fieldIssues": "{% $states.result.Payload.fieldIssues %}",
+        "isValid": "{% $states.result.Payload.isValid %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda AssembleFinalOutput"
+    },
+    "Lambda AssembleFinalOutput": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-final-assembler",
+        "Payload": {
+          "letterId": "{% $letterId %}",
+          "metadataRecord": "{% $metadataRecord %}",
+          "metadataS3Uri": "{% $metadataS3Uri %}",
+          "modsXmlS3Uri": "{% $modsXmlS3Uri %}",
+          "transcriptionOutputS3Uri": "{% $transcriptionOutputS3Uri %}",
+          "transcriptionByPageS3Uri": "{% $transcriptionByPageS3Uri %}",
+          "wordPositionsS3Uri": "{% $wordPositionsS3Uri %}",
+          "transcribeThinkingS3Uri": "{% $transcribeThinkingS3Uri %}",
+          "metadataThinkingS3Uri": "{% $metadataThinkingS3Uri %}",
+          "reconcileThinkingS3Uri": "{% $reconcileThinkingS3Uri %}",
+          "judgeThinkingS3Uri": "{% $judgeThinkingS3Uri %}",
+          "judgeInputS3Uri": "{% $judgeInputS3Uri %}",
+          "judgeOutputS3Uri": "{% $judgeOutputS3Uri %}",
+          "metadataScore": "{% $validatedMetadataScore %}",
+          "transcriptionScore": "{% $validatedTranscriptionScore %}",
+          "finalScore": "{% $validatedFinalScore %}",
+          "reason": "{% $validatedReason %}",
+          "fieldIssues": "{% $fieldIssues %}",
+          "transcriptionIssues": "{% $transcriptionIssues %}",
+          "transcriptionQuality": "{% $transcriptionQuality %}"
+        }
+      },
+      "Assign": {
+        "finalJsonS3Uri": "{% $states.result.Payload.finalJsonS3Uri %}",
+        "finalXmlS3Uri": "{% $states.result.Payload.finalXmlS3Uri %}"
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Lambda GitHubSync"
+    },
+    "Lambda GitHubSync": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "cursive-github-sync",
+        "Payload": {
+          "letterId": "{% $letterId %}",
+          "finalJsonS3Uri": "{% $finalJsonS3Uri %}",
+          "finalXmlS3Uri": "{% $finalXmlS3Uri %}"
+        }
+      },
+      "Output": "{% $states.result.Payload %}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "End": true
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+region                = "us-east-2"
+environment           = "prod"
+pipeline_bucket_name  = "cursive-letters-pipeline"
+
+# GitHub sync (CursiveGitHubSync Lambda)
+github_repo        = "tamulib-dc-labs/letters-metadata"
+github_base_branch = "main"
+github_token       = "ghp_REPLACE_ME"
+git_user_email     = "you@example.com"
+git_user_name      = "Your Name"
+
+log_retention_days = 30

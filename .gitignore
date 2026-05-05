@@ -1,0 +1,31 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+# Note: .terraform.lock.hcl SHOULD be committed (provider version pinning)
+
+# Secrets — committed example only
+terraform.tfvars
+*.auto.tfvars
+
+# Build artifacts
+*.zip.staged
+.lambda_build/
+terraform/.lambda-zips/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
