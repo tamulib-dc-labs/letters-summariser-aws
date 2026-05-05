@@ -230,9 +230,9 @@ The `github_sync` Lambda pushes MODS files to `tamulib-dc-labs/letters-metadata`
 letters-summariser-aws/
 ├── README.md                      ← you are here
 ├── .gitignore
-├── terraform.tfvars.example       ← copy to terraform.tfvars and fill in
 │
 ├── terraform/                     ← all .tf code lives here
+│   ├── terraform.tfvars.example   ← copy to terraform.tfvars and fill in
 │   ├── main.tf                    ← provider + tags + locals
 │   ├── variables.tf               ← input variables
 │   ├── outputs.tf                 ← values printed after apply
@@ -264,12 +264,14 @@ letters-summariser-aws/
 
 ## 6. First-time setup
 
-### 6.1 Clone the repo
+### 6.1 Clone the repo and enter the terraform directory
 
 ```pwsh
 git clone https://github.com/tamulib-dc-labs/letters-summariser-aws.git
-cd letters-summariser-aws
+cd letters-summariser-aws\terraform
 ```
+
+All `terraform` commands in this guide are run from `letters-summariser-aws\terraform\`.
 
 ### 6.2 Create your `terraform.tfvars`
 
@@ -287,12 +289,13 @@ git_user_name  = "Your Name"
 
 The other variables (region, bucket name, etc.) have sensible defaults in [variables.tf](terraform/variables.tf) — change only if you want a different value.
 
-> **`terraform.tfvars` is gitignored.** Never commit it.
+> **`terraform.tfvars` is gitignored.** Never commit it. (And never put real secrets in `terraform.tfvars.example` — it IS tracked.)
+
+> Because `terraform.tfvars` lives next to your `.tf` files, Terraform auto-loads it on every command. You don't need `-var-file=` anywhere.
 
 ### 6.3 Initialize Terraform
 
 ```pwsh
-cd terraform
 terraform init
 ```
 
@@ -317,12 +320,12 @@ You're now ready to deploy. Skip to whichever section applies:
 
 ## 7. Deployment — fresh AWS account
 
-This path is the easy one. Run from the `terraform/` directory:
+This path is the easy one.
 
 ### 7.1 Plan
 
 ```pwsh
-terraform plan -var-file=..\terraform.tfvars -out=plan.out
+terraform plan -out=plan.out
 ```
 
 Read the plan output. You should see ~70 resources to create — Lambdas, log groups, IAM roles, the SM, the bucket, etc. **No destroys, no replacements.**
@@ -357,8 +360,6 @@ If your AWS account already has the manually-deployed Cursive resources (PascalC
 
 ### 8.1 Import the 5 stateful/named resources
 
-Run these from `terraform/`:
-
 ```pwsh
 terraform import aws_s3_bucket.pipeline cursive-letters-pipeline
 terraform import aws_dynamodb_table.debounce CursiveDebounce
@@ -372,7 +373,7 @@ Each command should print `Import successful!`.
 ### 8.2 Plan
 
 ```pwsh
-terraform plan -var-file=..\terraform.tfvars -out=cutover.tfplan
+terraform plan -out=cutover.tfplan
 ```
 
 Read the plan carefully. You should see:
@@ -514,7 +515,7 @@ aws lambda delete-layer-version --layer-name git-lfs-layer --version-number 1 --
 1. Edit the relevant `.tf` or Lambda source file.
 2. `terraform fmt`
 3. `terraform validate`
-4. `terraform plan -var-file=..\terraform.tfvars -out=plan.out` — read it.
+4. `terraform plan -out=plan.out` — read it.
 5. `terraform apply plan.out`
 
 ### Common changes
