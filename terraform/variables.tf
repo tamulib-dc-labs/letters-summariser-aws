@@ -21,9 +21,9 @@ variable "bedrock_model_id" {
 }
 
 variable "bedrock_foundation_model_arn_pattern" {
-  description = "Foundation model ARN(s) the inference profile resolves to. Used in IAM policy."
+  description = "Foundation model ARN(s) the inference profile resolves to. Used in IAM policy. Wildcard at end covers versioned (model-id:0) and unversioned (model-id) forms across regions."
   type        = string
-  default     = "arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-6-v1:0"
+  default     = "arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-6-v1*"
 }
 
 variable "github_repo" {

@@ -122,13 +122,23 @@ locals {
     PIPELINE_BUCKET = var.pipeline_bucket_name
   }
 
-  # Extra env vars only github_sync needs.
-  github_sync_env = {
-    GITHUB_TOKEN       = var.github_token
-    GITHUB_REPO        = var.github_repo
-    GITHUB_BASE_BRANCH = var.github_base_branch
-    GIT_USER_EMAIL     = var.git_user_email
-    GIT_USER_NAME      = var.git_user_name
+  # Per-function extra env vars.
+  per_lambda_env = {
+    debouncer = {
+      # SFN ARN is computed string-wise to avoid a TF resource cycle
+      # (aws_sfn_state_machine.pipeline depends_on the Lambdas).
+      SFN_ARN            = "arn:aws:states:${var.region}:${local.account_id}:stateMachine:letters_metadata_automation"
+      SCHEDULER_ROLE_ARN = aws_iam_role.scheduler_invoker.arn
+      SCHEDULE_GROUP     = aws_scheduler_schedule_group.debounce.name
+      DEBOUNCE_TABLE     = aws_dynamodb_table.debounce.name
+    }
+    github_sync = {
+      GITHUB_TOKEN       = var.github_token
+      GITHUB_REPO        = var.github_repo
+      GITHUB_BASE_BRANCH = var.github_base_branch
+      GIT_USER_EMAIL     = var.git_user_email
+      GIT_USER_NAME      = var.git_user_name
+    }
   }
 }
 
@@ -173,7 +183,7 @@ resource "aws_lambda_function" "fn" {
   layers = [for l in each.value.layers : local.layer_arns[l]]
 
   environment {
-    variables = each.key == "github_sync" ? merge(local.common_env, local.github_sync_env) : local.common_env
+    variables = merge(local.common_env, lookup(local.per_lambda_env, each.key, {}))
   }
 
   # Make sure the log group exists before the function is created (otherwise

@@ -140,6 +140,33 @@ resource "aws_iam_role_policy" "orchestrator_textract" {
   })
 }
 
+# S3 access on the pipeline bucket.
+# Required because:
+#   - Textract.AnalyzeDocument fetches the input image from S3 using the SM's role identity
+#   - Bedrock.InvokeModel tasks read input + write output via S3Uri using the SM's role identity
+resource "aws_iam_role_policy" "orchestrator_s3" {
+  name = "pipeline-bucket-access"
+  role = aws_iam_role.orchestrator.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "PipelineBucketObjects"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = "${aws_s3_bucket.pipeline.arn}/*"
+      },
+      {
+        Sid      = "PipelineBucketList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = aws_s3_bucket.pipeline.arn
+      }
+    ]
+  })
+}
+
 # CloudWatch Logs — required for Step Functions logging (when enabled).
 resource "aws_iam_role_policy" "orchestrator_logs" {
   name = "cloudwatch-logs"

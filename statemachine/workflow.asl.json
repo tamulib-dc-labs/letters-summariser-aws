@@ -501,7 +501,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Comment": "Hallucinations found and retries remaining � re-enrich then reconcile again",
+          "Comment": "Hallucinations found and retries remaining — re-enrich then reconcile again",
           "Condition": "{% $reconciled = false and $reconcileAttempt < 2 %}",
           "Next": "Lambda AATLookup"
         }

@@ -1,15 +1,15 @@
 import boto3
 import json
+import os
 import re
 from datetime import datetime, timezone, timedelta
 
-REGION = "us-east-2"
-ACCOUNT_ID = "728905193692"
-SFN_ARN = "arn:aws:states:us-east-2:728905193692:stateMachine:letters_metadata_automation"
-SCHEDULER_ROLE_ARN = "arn:aws:iam::728905193692:role/EventBridgeSchedulerRole"
-SCHEDULE_GROUP = "cursive-debounce"
-TABLE_NAME = "CursiveDebounce"
-DEBOUNCE_MINUTES = 5
+REGION = os.environ.get("AWS_REGION", "us-east-2")
+SFN_ARN = os.environ["SFN_ARN"]
+SCHEDULER_ROLE_ARN = os.environ["SCHEDULER_ROLE_ARN"]
+SCHEDULE_GROUP = os.environ.get("SCHEDULE_GROUP", "cursive-debounce")
+TABLE_NAME = os.environ.get("DEBOUNCE_TABLE", "CursiveDebounce")
+DEBOUNCE_MINUTES = int(os.environ.get("DEBOUNCE_MINUTES", "5"))
 
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(TABLE_NAME)
