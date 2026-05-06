@@ -22,22 +22,26 @@ GIT_USER_NAME   = os.environ.get("GIT_USER_NAME",      "Cursive Pipeline")
 GIT_USER_EMAIL  = os.environ.get("GIT_USER_EMAIL",     "cursive-pipeline@tamu.edu")
 
 # Layer-provided binaries land under /opt; standard layer layout is /opt/bin.
-# Setting PATH up-front lets git invoke git-lfs as a subcommand seamlessly.
 _LAYER_BIN = "/opt/bin"
 os.environ["PATH"] = f"{_LAYER_BIN}:{os.environ.get('PATH', '')}"
-os.environ["HOME"] = "/tmp"  # git needs a writable HOME for config + lfs cache
+os.environ["HOME"] = "/tmp"  # git needs a writable HOME for config
 # git looks for subcommand helpers (git-remote-https, git-http-fetch, …) here.
 os.environ["GIT_EXEC_PATH"] = "/opt/libexec/git-core"
 # Suppress "templates not found" warning — we don't ship /usr/share/git-core/templates.
 os.environ["GIT_TEMPLATE_DIR"] = ""
-# Point git-lfs at a writable cache dir.
-os.environ["GIT_LFS_SKIP_SMUDGE"] = "0"
+# Skip any LFS smudge if a stale system filter is configured — we commit images
+# as regular blobs, and any pointer files in the clone are about to be overwritten.
+os.environ["GIT_LFS_SKIP_SMUDGE"] = "1"
 # CA bundle shipped in the layer, for HTTPS to github.com.
 os.environ["GIT_SSL_CAINFO"] = "/opt/etc/pki/tls/certs/ca-bundle.crt"
 os.environ["SSL_CERT_FILE"] = "/opt/etc/pki/tls/certs/ca-bundle.crt"
 
-# Image extensions LFS will track inside the repo.
-LFS_EXTENSIONS = ("jpg", "jpeg", "png", "tif", "tiff", "gif", "webp", "bmp")
+# .gitattributes content the pipeline maintains — no LFS filters, since
+# GitHub Pages and the editor's <img> loads can't resolve LFS objects.
+GITATTRIBUTES_CONTENT = (
+    "# Managed by CursiveGitHubSync — do not add LFS filters for images.\n"
+    "# GitHub Pages does not resolve LFS, so images must be regular git blobs.\n"
+)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -156,17 +160,20 @@ def lambda_handler(event, context):
         run(["git", "clone", "--depth", "1", "--branch", BASE_BRANCH, clone_url, repo_dir],
             sensitive=True)
 
-        # 2. Identity + LFS setup
+        # 2. Identity
         run(["git", "config", "user.name",  GIT_USER_NAME],  cwd=repo_dir)
         run(["git", "config", "user.email", GIT_USER_EMAIL], cwd=repo_dir)
-        run(["git", "lfs", "install", "--local"], cwd=repo_dir)
-
-        for ext in LFS_EXTENSIONS:
-            run(["git", "lfs", "track", f"*.{ext}"],         cwd=repo_dir)
-            run(["git", "lfs", "track", f"*.{ext.upper()}"], cwd=repo_dir)
 
         # 3. Branch off main
         run(["git", "checkout", "-b", new_branch], cwd=repo_dir)
+
+        # 3a. Heal .gitattributes — earlier revisions of this Lambda installed
+        # LFS filters for image extensions, which made committed images render
+        # as pointer files (132B) instead of real JPEGs. Overwrite with a clean
+        # version on every run so the repo self-heals after a single pipeline run.
+        gitattr_path = os.path.join(repo_dir, ".gitattributes")
+        with open(gitattr_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(GITATTRIBUTES_CONTENT)
 
         # 4. Stage files into letters/<letterId>/
         letter_dir = os.path.join(repo_dir, "letters", lid)
@@ -208,7 +215,7 @@ def lambda_handler(event, context):
         run(["git", "commit", "-m", f"Add metadata for {letter_id} ({timestamp} UTC)"],
             cwd=repo_dir)
 
-        # 6. Push branch (LFS objects pushed automatically alongside)
+        # 6. Push branch
         run(["git", "push", "-u", "origin", new_branch], cwd=repo_dir)
 
         # 7. Open PR against main
@@ -219,7 +226,7 @@ def lambda_handler(event, context):
             "body": (
                 f"Automated metadata sync for **{letter_id}**.\n\n"
                 f"- Pipeline run: `{timestamp}` UTC\n"
-                f"- Files: `final.json`, `mods.xml`, {len(images)} page image(s) (LFS)\n"
+                f"- Files: `final.json`, `mods.xml`, {len(images)} page image(s)\n"
             ),
         })
         pr_url    = pr.get("html_url")
