@@ -14,14 +14,12 @@ This README is a **complete walkthrough** — from "I have never used Terraform"
 4. [Prerequisites](#4-prerequisites)
 5. [Repo layout](#5-repo-layout)
 6. [First-time setup](#6-first-time-setup)
-7. [Deployment — fresh AWS account](#7-deployment--fresh-aws-account)
-8. [Deployment — existing AWS account (cutover)](#8-deployment--existing-aws-account-cutover)
-9. [Smoke test](#9-smoke-test)
-10. [Decommissioning the old stack](#10-decommissioning-the-old-stack)
-11. [Day-2 operations](#11-day-2-operations)
-12. [Troubleshooting](#12-troubleshooting)
-13. [What's NOT managed by this Terraform](#13-whats-not-managed-by-this-terraform)
-14. [Secrets handling](#14-secrets-handling)
+7. [Deployment](#7-deployment)
+8. [Smoke test](#8-smoke-test)
+9. [Day-2 operations](#9-day-2-operations)
+10. [Troubleshooting](#10-troubleshooting)
+11. [What's NOT managed by this Terraform](#11-whats-not-managed-by-this-terraform)
+12. [Secrets handling](#12-secrets-handling)
 
 ---
 
@@ -312,15 +310,13 @@ terraform validate
 
 Expect: `Success! The configuration is valid.`
 
-You're now ready to deploy. Skip to whichever section applies:
-- **Section 7** if you're deploying to a fresh AWS account with no existing Cursive resources.
-- **Section 8** if you're deploying to the existing AWS account (account `728905193692`) that already has manually-created Cursive resources.
+You're now ready to deploy.
 
 ---
 
-## 7. Deployment — fresh AWS account
+## 7. Deployment
 
-This path is the easy one.
+> **State warning**: Terraform stores state in `terraform/terraform.tfstate` (local). If you're deploying to a *different AWS account* than one you've previously deployed to from this repo clone, **set aside or delete the existing `terraform.tfstate` first** — otherwise TF will think the new account is supposed to look like the old one and may try to recreate or modify resources unexpectedly. For team-scale work, move state to an S3 backend.
 
 ### 7.1 Plan
 
@@ -328,7 +324,7 @@ This path is the easy one.
 terraform plan -out=plan.out
 ```
 
-Read the plan output. You should see ~70 resources to create — Lambdas, log groups, IAM roles, the SM, the bucket, etc. **No destroys, no replacements.**
+Read the plan output. You should see ~95 resources to create — Lambdas, log groups, IAM roles, the SM, the bucket, etc. **No destroys, no replacements.**
 
 If the plan looks right, apply it:
 
@@ -348,69 +344,19 @@ pipeline_bucket_name = "cursive-letters-pipeline"
 ...
 ```
 
-Skip to **section 9 (smoke test)**.
+Continue to **section 8 (smoke test)** to verify the pipeline works end to end.
 
 ---
 
-## 8. Deployment — existing AWS account (cutover)
-
-If your AWS account already has the manually-deployed Cursive resources (PascalCase Lambda names, `CursiveOrchestratorRole`, etc.), you must do a **parallel-deploy-and-swap** migration. The principle:
-- **Stateful or globally-named resources** (the S3 bucket, DynamoDB table, SSM param, scheduler group, state machine) get **imported** into TF state — TF takes over without recreating them.
-- **Everything else** (Lambdas, IAM roles, EB rule, etc.) gets created **alongside** the old resources. The old ones keep running until the new pipeline is verified, then you delete them.
-
-### 8.1 Import the 5 stateful/named resources
-
-```pwsh
-terraform import aws_s3_bucket.pipeline cursive-letters-pipeline
-terraform import aws_dynamodb_table.debounce CursiveDebounce
-terraform import aws_ssm_parameter.validation_rules /cursive-pipeline/validation-rules
-terraform import aws_scheduler_schedule_group.debounce cursive-debounce
-terraform import aws_sfn_state_machine.pipeline arn:aws:states:us-east-2:728905193692:stateMachine:letters_metadata_automation
-```
-
-Each command should print `Import successful!`.
-
-### 8.2 Plan
-
-```pwsh
-terraform plan -out=cutover.tfplan
-```
-
-Read the plan carefully. You should see:
-
-- **~65 creates**: 15 new Lambdas (`cursive-prepare-pages` etc.), 15 log groups, 17 IAM roles + policies, 2 layer versions, EB rule + target + permission, SF log group, S3 bucket sub-resources (versioning/encryption/public-access-block/ownership/notification).
-- **~5 updates in place**: state machine (new role, new ASL with kebab-case fn names, logging enabled); SSM parameter, S3 bucket, DDB table, scheduler group reconcile metadata only.
-- **0 destroys.**
-
-> **🚨 Read the plan for unexpected destroys or replacements.** If you see `-/+` lines on the bucket or state machine, stop and ask before applying.
-
-### 8.3 Apply
-
-```pwsh
-terraform apply cutover.tfplan
-```
-
-Apply takes ~3–5 minutes.
-
-After apply succeeds:
-- New `cursive-*` Lambdas exist alongside the old `Cursive*` ones.
-- The state machine has been swapped to use the new IAM role and the new (kebab-case) Lambda names. **The pipeline is now running on the new stack.**
-- The old `Cursive*` Lambdas are orphaned but still deployed (cheap insurance for rollback).
-- The old EventBridge rule (`CursiveS3UploadDebouncer`) is still active and routing S3 events to the old debouncer, which still calls into the (now-updated) state machine. **This works** because both old and new debouncer paths end up at the same SM.
-
-Continue to **section 9 (smoke test)** before disabling the old EB rule.
-
----
-
-## 9. Smoke test
+## 8. Smoke test
 
 Goal: verify a real letter goes through the pipeline end to end and ends up as a PR/commit on `tamulib-dc-labs/letters-metadata`.
 
-### 9.1 Pick a test letter
+### 8.1 Pick a test letter
 
 Find a small JPG of a handwritten letter. 1–2 pages is fine. Name pages so they sort correctly: `page_01.jpg`, `page_02.jpg`, etc.
 
-### 9.2 Upload to S3
+### 8.2 Upload to S3
 
 Use a unique `letterId` to avoid colliding with anything already there:
 
@@ -420,7 +366,7 @@ aws s3 cp page_01.jpg "s3://cursive-letters-pipeline/input/$letter/page_01.jpg"
 # (If multi-page, upload the rest too)
 ```
 
-### 9.3 Watch the debouncer fire
+### 8.3 Watch the debouncer fire
 
 ```pwsh
 aws logs tail /aws/lambda/cursive-debouncer --follow --region us-east-2
@@ -435,11 +381,11 @@ Scheduled Step Function for ... to fire at ... UTC
 
 Press Ctrl-C to stop tailing.
 
-### 9.4 Wait 5 minutes
+### 8.4 Wait 5 minutes
 
 The debouncer schedules the SM to fire 5 minutes after the last upload. Go make tea.
 
-### 9.5 Watch the Step Function execution
+### 8.5 Watch the Step Function execution
 
 Open the Step Functions console in `us-east-2` → State machines → `letters_metadata_automation` → Executions. You should see a new running execution. Click it and watch the graph as it progresses.
 
@@ -449,7 +395,7 @@ If a state goes red, click it to see the error. Common ones:
 - **`Bedrock.AccessDeniedException`** → you forgot to enable Bedrock model access (see [section 4.3](#43-bedrock-model-access-enabled)).
 - **`Lambda timeout`** → bump the timeout in [lambdas.tf](terraform/lambdas.tf), `terraform apply`, retry.
 
-### 9.6 Verify outputs
+### 8.6 Verify outputs
 
 When the execution completes (green "Succeeded"):
 
@@ -462,67 +408,9 @@ When the execution completes (green "Succeeded"):
 
 If all three check out, **the pipeline works**. 🎉
 
-### 9.7 Cut over (only relevant for section 8 cutover path)
-
-Once the smoke test passes, **the old EventBridge rule must be deleted** so the pipeline runs only through the new (Terraform-managed) path. Leaving it enabled creates a duplicate-trigger race where both old and new debouncers fire on every S3 upload.
-
-This is **mandatory** — not a deferred decommission step. Do it the same day cutover succeeds.
-
-```pwsh
-# 1. Disable first (reversible quick-stop in case smoke test had a hidden issue)
-aws events disable-rule --name CursiveS3UploadDebouncer --region us-east-2
-
-# 2. Run one more smoke test through the new path only — confirm:
-#    - /aws/lambda/cursive-debouncer log group shows activity
-#    - /aws/lambda/CursiveDebouncer log group is silent
-#    - SF execution starts and succeeds
-
-# 3. Delete the rule (target first, then the rule itself)
-aws events remove-targets --rule CursiveS3UploadDebouncer --ids CursiveDebouncerTarget --region us-east-2
-aws events delete-rule --name CursiveS3UploadDebouncer --region us-east-2
-
-# 4. Verify it's gone
-aws events describe-rule --name CursiveS3UploadDebouncer --region us-east-2
-# Expected: ResourceNotFoundException
-```
-
-The rest of the old stack (PascalCase Lambdas, old IAM roles, old layer versions) can wait — proceed to section 10 after 24–48h of green operation.
-
 ---
 
-## 10. Decommissioning the old stack
-
-After 24–48 hours of green operation on the new stack, delete the remaining old PascalCase resources. Do this from the AWS Console (safer — easier to confirm what you're deleting) or via CLI.
-
-> The old EventBridge rule was already deleted in section 9.7. The remaining old resources are now orphaned (nothing routes to them) but still incur metadata clutter and a small ongoing cost for the layer-version storage.
-
-```pwsh
-# Old customer-managed policy (only used by the orphaned EventBridgeSchedulerRole)
-aws iam delete-policy --policy-arn arn:aws:iam::728905193692:policy/CursiveSchedulerInvokeStepFunction
-```
-
-**Old Lambdas** (do these via console — Lambda → Functions → search "Cursive"):
-- 15 Lambdas with PascalCase names (`CursivePreparePages`, `CursiveGitHubSync`, etc.)
-- ⚠️ Do NOT delete the `cursive-*` (kebab-case) ones — those are TF-managed and live.
-
-**Old IAM roles** (Console → IAM → Roles → search "Cursive" and "EventBridgeSchedulerRole"):
-- `CursiveOrchestratorRole`
-- `CursivePipelineLambdaRole`
-- `CursiveDebouncerLambdaRole`
-- `EventBridgeSchedulerRole`
-- 14 auto-generated `Cursive*-role-<random>` roles
-
-**Old layer versions** (after old Lambdas are deleted):
-```pwsh
-aws lambda delete-layer-version --layer-name pillow-layer --version-number 2 --region us-east-2
-aws lambda delete-layer-version --layer-name git-lfs-layer --version-number 1 --region us-east-2
-```
-
-(The new TF-managed layer versions will be `pillow-layer:3` and `git-lfs-layer:2` or higher.)
-
----
-
-## 11. Day-2 operations
+## 9. Day-2 operations
 
 ### Making changes
 
@@ -559,7 +447,7 @@ Set a billing alert in AWS Budgets if you're processing many letters.
 
 ---
 
-## 12. Troubleshooting
+## 10. Troubleshooting
 
 ### `terraform init` complains about provider versions
 Delete `.terraform/` and the lock file, re-run init:
@@ -582,24 +470,22 @@ Open the execution in the SF console, click the failed state, read the error in 
 Your `github_token` has expired or lacks `repo` scope. Generate a new one, update `terraform.tfvars`, run `terraform apply`. (You don't need a full plan/import cycle — just the token change.)
 
 ### "Resource already exists" on apply
-You're deploying to an account that already has Cursive resources but didn't follow section 8's import steps. Either drop the existing resources or run the imports.
+The named resource (S3 bucket, DynamoDB table, SSM param, Scheduler group, or state machine) already exists in the AWS account. Either delete it via console first, or `terraform import` it into TF state to adopt it. Most likely you're reusing a state file from a different account — see the state warning in [section 7](#7-deployment).
 
 ---
 
-## 13. What's NOT managed by this Terraform
+## 11. What's NOT managed by this Terraform
 
-By design, the following are not part of the TF stack. They're either dead/legacy or external:
+By design, these are external or out of scope:
 
-- Legacy S3 buckets `cursive-letters-input-1`, `cursive-letters-intermediate`, `cursive-letters-final`, `cursive-lambda-layers` — predate this migration; clean up via console if you want.
-- Bedrock guardrail `cursive-pipeline-guardrail` — dormant, not referenced.
-- Bedrock agent `agent-quick-start-glt3e` — console exploration leftover.
-- A2I-related Lambdas (`CursiveA2ITrigger`, `CursiveA2IResultProcessor`) — dropped (workflow was dead).
-- `CursiveIngestion` Lambda — dropped (not in the operational path; no triggers).
-- The destination GitHub repo `tamulib-dc-labs/letters-metadata` itself.
+- **Bedrock model access** — must be enabled per account/region via the AWS Console (see [section 4.3](#43-bedrock-model-access-enabled)).
+- **The destination GitHub repo** `tamulib-dc-labs/letters-metadata` — assumed to already exist; this Terraform writes *to* it via the `github_sync` Lambda but doesn't manage the repo itself.
+- **Terraform state backend** — state is stored locally in `terraform/terraform.tfstate` by default. For team or production use, migrate to a remote backend (e.g., S3 bucket + DynamoDB lock table). Out of scope for this README.
+- **AWS account, IAM user/credentials, billing** — your responsibility to set up before running Terraform.
 
 ---
 
-## 14. Secrets handling
+## 12. Secrets handling
 
 - `terraform.tfvars` contains the GitHub PAT and git user info. **It is gitignored. Never commit it.**
 - The PAT is passed to the GitHub-sync Lambda as an environment variable (`GITHUB_TOKEN`). Anyone with `lambda:GetFunctionConfiguration` on that Lambda can read it.
