@@ -464,26 +464,40 @@ If all three check out, **the pipeline works**. 🎉
 
 ### 9.7 Cut over (only relevant for section 8 cutover path)
 
-Once the smoke test passes, disable the old EventBridge rule so it stops routing to the old (now-orphaned) debouncer:
+Once the smoke test passes, **the old EventBridge rule must be deleted** so the pipeline runs only through the new (Terraform-managed) path. Leaving it enabled creates a duplicate-trigger race where both old and new debouncers fire on every S3 upload.
+
+This is **mandatory** — not a deferred decommission step. Do it the same day cutover succeeds.
 
 ```pwsh
+# 1. Disable first (reversible quick-stop in case smoke test had a hidden issue)
 aws events disable-rule --name CursiveS3UploadDebouncer --region us-east-2
+
+# 2. Run one more smoke test through the new path only — confirm:
+#    - /aws/lambda/cursive-debouncer log group shows activity
+#    - /aws/lambda/CursiveDebouncer log group is silent
+#    - SF execution starts and succeeds
+
+# 3. Delete the rule (target first, then the rule itself)
+aws events remove-targets --rule CursiveS3UploadDebouncer --ids CursiveDebouncerTarget --region us-east-2
+aws events delete-rule --name CursiveS3UploadDebouncer --region us-east-2
+
+# 4. Verify it's gone
+aws events describe-rule --name CursiveS3UploadDebouncer --region us-east-2
+# Expected: ResourceNotFoundException
 ```
 
-Run another smoke test to confirm the new EB rule (`cursive-s3-upload-debouncer`) is the only path. Then proceed to section 10.
+The rest of the old stack (PascalCase Lambdas, old IAM roles, old layer versions) can wait — proceed to section 10 after 24–48h of green operation.
 
 ---
 
 ## 10. Decommissioning the old stack
 
-After 24–48 hours of green operation on the new stack, delete the old PascalCase resources. Do this from the AWS Console (safer — easier to confirm what you're deleting) or via CLI.
+After 24–48 hours of green operation on the new stack, delete the remaining old PascalCase resources. Do this from the AWS Console (safer — easier to confirm what you're deleting) or via CLI.
+
+> The old EventBridge rule was already deleted in section 9.7. The remaining old resources are now orphaned (nothing routes to them) but still incur metadata clutter and a small ongoing cost for the layer-version storage.
 
 ```pwsh
-# Old EventBridge rule + target
-aws events remove-targets --rule CursiveS3UploadDebouncer --ids CursiveDebouncerTarget --region us-east-2
-aws events delete-rule --name CursiveS3UploadDebouncer --region us-east-2
-
-# Old customer-managed policy
+# Old customer-managed policy (only used by the orphaned EventBridgeSchedulerRole)
 aws iam delete-policy --policy-arn arn:aws:iam::728905193692:policy/CursiveSchedulerInvokeStepFunction
 ```
 
